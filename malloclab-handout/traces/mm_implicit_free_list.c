@@ -1,13 +1,5 @@
 /*
- * mm-naive.c - The fastest, least memory-efficient malloc package.
- * 
- * In this naive approach, a block is allocated by simply incrementing
- * the brk pointer.  A block is pure payload. There are no headers or
- * footers.  Blocks are never coalesced or reused. Realloc is
- * implemented directly using mm_malloc and mm_free.
- *
- * NOTE TO STUDENTS: Replace this header comment with your own header
- * comment that gives a high level description of your solution.
+implicit free list 버전으로 작성한 csapp의 코드. 
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,7 +40,6 @@ team_t team = {
 #define DSIZE 8
 #define CHUNKSIZE mem_pagesize()
 #define MAX(x, y) ((x) > (y)? (x) : (y))
-#define ABS(x) ((x)>0 ? (x) : (-1)*(x))
 #define PACK(size, alloc)  ((size) | (alloc))
 // Read and write a word at address p... unsigned int로 캐스팅하고 읽어오는것.
 #define GET(p) (*(unsigned int *)(p))
@@ -65,31 +56,17 @@ team_t team = {
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)))
 #define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
 
-//explicit free list. payload 내부에 후손, 자손 포인터를 wsize만큼 저장. 
-#define PRED_FREE(bp) ((char *)(bp))
-#define SUCC_FREE(bp) ((char *)(bp) + WSIZE)
-
-#define GET_PRED(bp) (*(void **)(PRED_FREE(bp)))
-#define GET_SUCC(bp) (*(void **)(SUCC_FREE(bp)))
-
-#define SET_PRED(bp, ptr) (GET_PRED(bp) = (ptr))
-#define SET_SUCC(bp, ptr) (GET_SUCC(bp) = (ptr))
-
-static void *heap_listp;
-static void *stack_top;
+static char *heap_listp;
 static void *extend_heap(size_t words);
 static void *coalesce(void *bp);
 static void *find_fit(size_t asize);
 static void place(void *bp, size_t asize);
-static void remove_block(void *bp);
-static void insert_block(void *bp);
 /* 
  * mm_init - initialize the malloc package.
  */
 int mm_init(void)
 {
     if((heap_listp = mem_sbrk(4*WSIZE)) == (void *)-1) return -1;
-    stack_top=NULL;
     PUT(heap_listp, 0); //일단 워드 4개만큼 힙 확장. 그리고 정렬을 이유로 한 워드 비워놓는다. 
     //그리고 그 다음에 프롤로그 헤더, 프롤로그 푸터를 설치. 마지막 워드에는 에필로그헤더를 설치.
     PUT(heap_listp + (WSIZE), PACK(DSIZE, 1));
@@ -115,17 +92,6 @@ static void *extend_heap(size_t words){
     //그 다음 푸터도 추가해주고, 마지막엔 새로운 에필로그 헤더를 설치한다. 
     PUT(FTRP(bp), PACK(size, 0));
     PUT(HDRP(NEXT_BLKP(bp)), PACK(0,1));
-    //이제 스택에 free block을 추가하거나 새로 설정한다. 
-    if(stack_top==NULL){
-        stack_top=bp;
-        SET_PRED(bp, NULL);
-        SET_SUCC(bp, NULL);
-    }
-    else{
-        SET_SUCC(stack_top, bp);
-        SET_PRED(bp, stack_top);
-        SET_SUCC(bp, NULL);
-    }
 
     return coalesce(bp);
 }
@@ -160,41 +126,29 @@ void *mm_malloc(size_t size)
 }
 
 static void *find_fit(size_t asize){
-    void *ptr=stack_top;
-    void *ans;
-    size_t diff=-1;
-    int cnt=0;
-    while(ptr!=NULL&& cnt<=20){
-        size_t diffnow=GET_SIZE(ptr)-asize;
-        if(diffnow>=0 && diffnow<=2*DSIZE){
+    char *ptr = heap_listp; // 프롤로그 블록
+
+    // ptr 자체의 크기가 0(에필로그)보다 큰 동안만 전진
+    while (GET_SIZE(HDRP(ptr)) > 0) {
+        if (!GET_ALLOC(HDRP(ptr)) && (GET_SIZE(HDRP(ptr)) >= asize)) {
             return ptr;
         }
-        if(diffnow>=0){
-            if((diff<0) || (diff>diffnow)){
-                ans=ptr;
-                diff=diffnow;
-            }
-        }
-        cnt++;
+        ptr = NEXT_BLKP(ptr);
     }
-    return ans;
+    return NULL;
 }
 
 static void place(void *bp, size_t asize){
     size_t csize=GET_SIZE(HDRP(bp));
 
     if((csize-asize)>=(2*DSIZE)){
-        remove_block(bp);
         PUT(HDRP(bp), PACK(asize, 1));
         PUT(FTRP(bp), PACK(asize, 1));
         bp=NEXT_BLKP(bp);
         PUT(HDRP(bp), PACK(csize-asize, 0));
         PUT(FTRP(bp), PACK(csize-asize, 0));
-        insert_block(bp);
-        
     }
     else{
-        remove_block(bp);
         PUT(HDRP(bp), PACK(csize, 1));
         PUT(FTRP(bp), PACK(csize, 1));
     }
@@ -217,16 +171,13 @@ static void *coalesce(void *bp){
     size_t size=GET_SIZE(HDRP(bp));
 
     if(prev_alloc && next_alloc){
-        insert_block(bp);
         return bp;
     }
 
     else if(prev_alloc && !next_alloc){
-        remove_block(NEXT_BLKP(bp));
         size+=GET_SIZE(HDRP(NEXT_BLKP(bp)));
         PUT(HDRP(bp), PACK(size, 0));
         PUT(FTRP(bp), PACK(size, 0));
-        insert_block(bp);
     }
 
     else if(!prev_alloc && next_alloc){
@@ -234,57 +185,16 @@ static void *coalesce(void *bp){
         PUT(FTRP(bp), PACK(size, 0));
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
         bp=PREV_BLKP(bp);
-         //어차피 꽁무니에 free가 연장되는것, 즉 포인터위치나 블록 위치는 바뀌지 않으므로
-        //스택은 변경해줄 필요가 없다. 
     }
     else{
         size+=GET_SIZE(HDRP(PREV_BLKP(bp)))+GET_SIZE(FTRP(NEXT_BLKP(bp)));
-        remove_block(PREV_BLKP(bp));
-        remove_block(NEXT_BLKP(bp));
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
         PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
         bp=PREV_BLKP(bp);
-        insert_block(bp);
     }
     return bp;
 }
 
-
-static void remove_block(void *bp) {
-    if (bp == NULL) return;
-
-    void *prev = GET_PRED(bp);
-    void *next = GET_SUCC(bp);
-
-    /* 1. 이전 노드의 SUCC 포인터 갱신 */
-    if (prev != NULL) {
-        SET_SUCC(prev, next);
-    }
-
-    /* 2. 다음 노드의 PRED 포인터 또는 Top 포인터(free_listp) 갱신 */
-    if (next != NULL) {
-        SET_PRED(next, prev);
-    } else {
-        /* next가 NULL이라는 것은 bp가 스택의 맨 끝(Top)이었다는 의미 */
-        stack_top = prev;
-    }
-}
-
-static void insert_block(void *bp) {
-    if (bp == NULL) return;
-
-    /* 새 블록은 Top이 되므로 다음(SUCC)은 NULL */
-    SET_SUCC(bp, NULL);
-    SET_PRED(bp, stack_top);
-
-    if (stack_top != NULL) {
-        /* 기존 Top의 다음으로 새 블록 연결 */
-        SET_SUCC(stack_top, bp);
-    }
-    
-    /* Top 포인터를 새 블록으로 갱신 */
-    stack_top = bp;
-}
 /*
  * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
  */
