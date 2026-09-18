@@ -1,5 +1,6 @@
 /*
-implicit free list 버전으로 작성한 csapp의 코드. 
+    implicit free list ver. use a address aligned search algorithm, which also means that it searchs either allocated block and free block, 
+    which is a run-time waste.  
  */
 #include <stdio.h>
 #include <stdlib.h>
